@@ -11,16 +11,10 @@
  *               ajinkya/fire/flame
  *
  *   Subscribe : ajinkya/fire/control
- *     Commands: mq7alert<value>      e.g. mq7alert500
- *               tempalert<value>     e.g. tempalert40
- *               humidityalert<value> e.g. humidityalert80
- *               fireon
- *               fireoff
  *
- * Libraries required (install via Arduino Library Manager):
- *   - PubSubClient by Nick O'Leary
- *   - DHT sensor library by Adafruit
- *   - Adafruit Unified Sensor
+ * FLAME SENSOR LOGIC:
+ *   LOW  = Fire Detected  → RED LED ON  + Buzzer ON  → MQTT "0"
+ *   HIGH = No Fire        → GREEN LED ON + Buzzer OFF → MQTT "1"
  * ======================================================
  */
 
@@ -29,19 +23,24 @@
 #include <DHT.h>
 
 // =====================================================
-//                  CONFIGURATION
+//                  WIFI CONFIG
 // =====================================================
 
-// --- WiFi ---
 const char* ssid     = "iPhone";
 const char* password = "87654321";
 
-// --- MQTT ---
-const char* mqtt_server = "dev.coppercloud.in";
-const int   mqtt_port   = 1883;
+// =====================================================
+//                  MQTT CONFIG
+// =====================================================
+
+const char* mqtt_server   = "dev.coppercloud.in";
+const int   mqtt_port     = 1883;
 const char* mqtt_client_id = "ESP32_SMART_SAFETY";
 
-// --- Topics ---
+// =====================================================
+//                  MQTT TOPICS
+// =====================================================
+
 const char* TOPIC_TEMP     = "ajinkya/fire/temp";
 const char* TOPIC_HUMIDITY = "ajinkya/fire/humidity";
 const char* TOPIC_GAS      = "ajinkya/fire/gas";
@@ -49,164 +48,156 @@ const char* TOPIC_FLAME    = "ajinkya/fire/flame";
 const char* TOPIC_CONTROL  = "ajinkya/fire/control";
 
 // =====================================================
-//                   PIN DEFINITIONS
+//                  PIN DEFINITIONS
 // =====================================================
 
-#define DHTPIN      4
-#define DHTTYPE     DHT11
-#define MQ7_PIN     34
-#define FLAME_PIN   27
-#define GREEN_LED   18
-#define RED_LED     19
-#define BUZZER      23
+#define DHTPIN    4
+#define DHTTYPE   DHT11
+
+#define MQ7_PIN   34
+#define FLAME_PIN 27
+
+#define GREEN_LED 18
+#define RED_LED   19
+#define BUZZER    23
 
 // =====================================================
-//                   ALERT THRESHOLDS
+//                  ALERT THRESHOLDS
 // =====================================================
 
-int   mq7Alert       = 500;
-float tempAlert      = 40.0;
-float humidityAlert  = 80.0;
-bool  fireEnable     = true;
+int   mq7Alert      = 500;
+float tempAlert     = 40.0;
+float humidityAlert = 80.0;
 
 // =====================================================
-//               SENSOR VALUES
+//                  SENSOR VARIABLES
 // =====================================================
 
+float temperature = 0;
+float humidity    = 0;
 int   gasValue    = 0;
-int   flameValue  = 0;
-float temperature = 0.0;
-float humidity    = 0.0;
+int   flameValue  = HIGH; // HIGH = No Fire (safe default)
 
 // =====================================================
-//               OBJECTS
+//                  OBJECTS
 // =====================================================
 
-DHT          dht(DHTPIN, DHTTYPE);
-WiFiClient   espClient;
+DHT dht(DHTPIN, DHTTYPE);
+WiFiClient espClient;
 PubSubClient client(espClient);
 
 // =====================================================
-//               MQTT CALLBACK
+//                  MQTT CALLBACK
 // =====================================================
 
 void callback(char* topic, byte* payload, unsigned int length) {
 
   String message = "";
+
   for (unsigned int i = 0; i < length; i++) {
     message += (char)payload[i];
   }
+
   message.trim();
 
   Serial.print("[MQTT] Received: ");
   Serial.println(message);
 
-  // --- MQ7 Alert ---
+  // Change MQ7 alert threshold
   if (message.startsWith("mq7alert")) {
     mq7Alert = message.substring(8).toInt();
-    Serial.print("[CTRL] MQ7 Alert → ");
+    Serial.print("New MQ7 Alert Threshold: ");
     Serial.println(mq7Alert);
   }
 
-  // --- Temp Alert ---
+  // Change Temperature alert threshold
   else if (message.startsWith("tempalert")) {
     tempAlert = message.substring(9).toFloat();
-    Serial.print("[CTRL] Temp Alert → ");
+    Serial.print("New Temp Alert Threshold: ");
     Serial.println(tempAlert);
   }
 
-  // --- Humidity Alert ---
+  // Change Humidity alert threshold
   else if (message.startsWith("humidityalert")) {
     humidityAlert = message.substring(13).toFloat();
-    Serial.print("[CTRL] Humidity Alert → ");
+    Serial.print("New Humidity Alert Threshold: ");
     Serial.println(humidityAlert);
-  }
-
-  // --- Fire Enable/Disable ---
-  else if (message == "fireon") {
-    fireEnable = true;
-    Serial.println("[CTRL] Fire Alarm ENABLED");
-  }
-  else if (message == "fireoff") {
-    fireEnable = false;
-    Serial.println("[CTRL] Fire Alarm DISABLED");
   }
 }
 
 // =====================================================
-//               WIFI SETUP
+//                  WIFI SETUP
 // =====================================================
 
 void setup_wifi() {
-  delay(10);
-  Serial.print("\n[WiFi] Connecting to: ");
+
+  Serial.println();
+  Serial.print("Connecting to WiFi: ");
   Serial.println(ssid);
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
-  int attempts = 0;
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
-    if (++attempts > 40) {
-      Serial.println("\n[WiFi] Failed! Restarting...");
-      ESP.restart();
-    }
   }
 
-  Serial.println("\n[WiFi] Connected!");
-  Serial.print("[WiFi] IP: ");
+  Serial.println();
+  Serial.println("WiFi Connected!");
+  Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
 }
 
 // =====================================================
-//               MQTT RECONNECT
+//                  MQTT RECONNECT
 // =====================================================
 
 void reconnect() {
-  while (!client.connected()) {
-    Serial.print("[MQTT] Connecting...");
 
-    // Unique client ID per attempt
+  while (!client.connected()) {
+
+    Serial.print("Connecting to MQTT...");
+
     String clientId = String(mqtt_client_id) + "_" + String(random(0xffff), HEX);
 
     if (client.connect(clientId.c_str())) {
-      Serial.println(" Connected!");
+
+      Serial.println("Connected!");
       client.subscribe(TOPIC_CONTROL);
-      Serial.print("[MQTT] Subscribed to: ");
-      Serial.println(TOPIC_CONTROL);
+      Serial.println("Subscribed to control topic");
+
     } else {
-      Serial.print(" Failed (rc=");
+
+      Serial.print("Failed, rc=");
       Serial.print(client.state());
-      Serial.println(") — retrying in 3s");
+      Serial.println(" — Retrying in 3 seconds...");
       delay(3000);
     }
   }
 }
 
 // =====================================================
-//               SETUP
+//                  SETUP
 // =====================================================
 
 void setup() {
+
   Serial.begin(115200);
-  delay(100);
 
-  Serial.println("\n=======================================");
-  Serial.println("    SMART SAFETY SYSTEM — ESP32");
-  Serial.println("=======================================\n");
-
-  // Sensor init
   dht.begin();
-  pinMode(FLAME_PIN, INPUT);
 
-  // LED + Buzzer
+  pinMode(FLAME_PIN, INPUT);
   pinMode(GREEN_LED, OUTPUT);
   pinMode(RED_LED,   OUTPUT);
   pinMode(BUZZER,    OUTPUT);
 
-  // Startup flash
+  // Safe state on startup
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED,   LOW);
+  digitalWrite(BUZZER,    LOW);
+
+  // Startup blink — 3x GREEN
   for (int i = 0; i < 3; i++) {
     digitalWrite(GREEN_LED, HIGH);
     delay(200);
@@ -214,88 +205,126 @@ void setup() {
     delay(200);
   }
 
-  // WiFi + MQTT
   setup_wifi();
+
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
 
-  Serial.println("\n[INFO] System ready. Publishing every 2s.");
+  Serial.println("SMART SAFETY SYSTEM READY");
 }
 
 // =====================================================
-//               LOOP
+//                  LOOP
 // =====================================================
 
 void loop() {
-  // Keep MQTT alive
+
+  // Maintain MQTT connection
   if (!client.connected()) {
     reconnect();
   }
   client.loop();
 
-  // ─── Read Sensors ────────────────────────────────
+  // =================================================
+  //  READ SENSORS
+  // =================================================
 
-  float newTemp = dht.readTemperature();
-  float newHum  = dht.readHumidity();
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
 
-  // Validate DHT readings (NaN check)
-  if (!isnan(newTemp)) temperature = newTemp;
-  if (!isnan(newHum))  humidity    = newHum;
+  if (!isnan(t)) temperature = t;
+  if (!isnan(h)) humidity    = h;
 
   gasValue   = analogRead(MQ7_PIN);
   flameValue = digitalRead(FLAME_PIN);
 
-  // ─── Serial Monitor ──────────────────────────────
+  // =================================================
+  //  SERIAL DEBUG
+  // =================================================
 
-  Serial.println("─────────────────────────────────");
-  Serial.printf("[DHT]   Temp:  %.1f °C\n",  temperature);
-  Serial.printf("[DHT]   Humid: %.1f %%\n",  humidity);
-  Serial.printf("[MQ7]   Gas:   %d ADC\n",   gasValue);
-  Serial.printf("[FLAME] Value: %d (%s)\n",  flameValue, flameValue == LOW ? "FIRE!" : "Clear");
+  Serial.println("--------------------------------");
+  Serial.print("Temperature : "); Serial.println(temperature);
+  Serial.print("Humidity    : "); Serial.println(humidity);
+  Serial.print("Gas Value   : "); Serial.println(gasValue);
+  Serial.print("Flame Pin   : "); Serial.println(flameValue == LOW ? "FIRE DETECTED" : "No Fire");
 
-  // ─── MQTT Publish ────────────────────────────────
+  // =================================================
+  //  MQTT PUBLISH — SENSORS
+  // =================================================
 
-  char buf[16];
+  char buffer[20];
 
-  snprintf(buf, sizeof(buf), "%.1f", temperature);
-  client.publish(TOPIC_TEMP, buf);
+  // Temperature
+  dtostrf(temperature, 4, 1, buffer);
+  client.publish(TOPIC_TEMP, buffer);
 
-  snprintf(buf, sizeof(buf), "%.1f", humidity);
-  client.publish(TOPIC_HUMIDITY, buf);
+  // Humidity
+  dtostrf(humidity, 4, 1, buffer);
+  client.publish(TOPIC_HUMIDITY, buffer);
 
-  snprintf(buf, sizeof(buf), "%d", gasValue);
-  client.publish(TOPIC_GAS, buf);
+  // Gas
+  sprintf(buffer, "%d", gasValue);
+  client.publish(TOPIC_GAS, buffer);
 
-  snprintf(buf, sizeof(buf), "%d", flameValue);
-  client.publish(TOPIC_FLAME, buf);
+  // =================================================
+  //  FLAME SENSOR — MQTT + LED + BUZZER
+  // =================================================
+  //
+  //  Flame sensor output:
+  //    LOW  = Fire Detected
+  //    HIGH = No Fire
+  //
+  //  MQTT publish:
+  //    "0" = Fire Detected
+  //    "1" = No Fire
+  //
+  // =================================================
 
-  // ─── Alert Evaluation ────────────────────────────
+  if (flameValue == HIGH) {
 
-  bool fireDetected     = (flameValue == LOW) && fireEnable;
-  bool gasDetected      = gasValue    > mq7Alert;
-  bool tempDetected     = temperature > tempAlert;
-  bool humidityDetected = humidity    > humidityAlert;
-  bool anyAlert         = fireDetected || gasDetected || tempDetected || humidityDetected;
+    // ---- FIRE DETECTED ----
 
-  // ─── Alert Output ────────────────────────────────
+    client.publish(TOPIC_FLAME, "0");  // Send 0 = Fire
 
-  if (anyAlert) {
-    digitalWrite(RED_LED,   HIGH);
-    digitalWrite(GREEN_LED, LOW);
-    digitalWrite(BUZZER,    HIGH);
+    digitalWrite(RED_LED,   HIGH);     // RED ON
+    digitalWrite(GREEN_LED, LOW);      // GREEN OFF
+    digitalWrite(BUZZER,    HIGH);     // Buzzer ON
 
-    Serial.println("[ALERT] ⚠ DANGER DETECTED ⚠");
-    if (fireDetected)     Serial.println("         → FLAME");
-    if (gasDetected)      Serial.printf("         → GAS (%d > %d)\n", gasValue, mq7Alert);
-    if (tempDetected)     Serial.printf("         → TEMP (%.1f > %.1f)\n", temperature, tempAlert);
-    if (humidityDetected) Serial.printf("         → HUMIDITY (%.1f > %.1f)\n", humidity, humidityAlert);
+    Serial.println("!!! FIRE DETECTED — RED LED ON + BUZZER ON !!!");
 
   } else {
-    digitalWrite(RED_LED,   LOW);
-    digitalWrite(GREEN_LED, HIGH);
-    digitalWrite(BUZZER,    LOW);
 
-    Serial.println("[STATUS] SAFE ✓");
+    // ---- NO FIRE ----
+
+    client.publish(TOPIC_FLAME, "1");  // Send 1 = No Fire
+
+    // Check other sensor alerts (Gas / Temp / Humidity)
+    bool gasDetected      = (gasValue    > mq7Alert);
+    bool tempDetected     = (temperature > tempAlert);
+    bool humidityDetected = (humidity    > humidityAlert);
+    bool otherAlert       = gasDetected || tempDetected || humidityDetected;
+
+    if (otherAlert) {
+
+      // Other sensor danger — RED LED + Buzzer
+      digitalWrite(RED_LED,   HIGH);
+      digitalWrite(GREEN_LED, LOW);
+      digitalWrite(BUZZER,    HIGH);
+
+      Serial.println("!!! OTHER SENSOR ALERT !!!");
+      if (gasDetected)      Serial.println("  -> GAS ALERT");
+      if (tempDetected)     Serial.println("  -> TEMP ALERT");
+      if (humidityDetected) Serial.println("  -> HUMIDITY ALERT");
+
+    } else {
+
+      // ALL SAFE — GREEN LED ON
+      digitalWrite(GREEN_LED, HIGH);   // GREEN ON
+      digitalWrite(RED_LED,   LOW);    // RED OFF
+      digitalWrite(BUZZER,    LOW);    // Buzzer OFF
+
+      Serial.println("SAFE — GREEN LED ON");
+    }
   }
 
   delay(2000);
